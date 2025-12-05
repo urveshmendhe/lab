@@ -1,105 +1,99 @@
+from datetime import datetime, timezone
 import re
-from datetime import datetime, timezone, timedelta
 
 # /home/umendhe/git/lab/test.py
 
 logs = [
-    '2025-12-01T10:30:33.182Z | 08504740 | 2025-12-0] 10:27:33 INFO foo lamba string - Successfully processed file filename_01 source foo source',
-    '2025-12-01T09:29:33.182Z | 08504740 | 2025-12-01 10:27:33 INFO foo lamba string - Processing file filename_01 attemp #0',
-    '2025-12-02110: 27:33.182Z | 08504740 | 2025-12-01 10:27:33 INFO foo lamba string - Successfully processed file filename_02 source foo source',
-    '2025-12-02T09:29:33.182Z | 08504740 | 2025-12-01 10:27:33 INFO foo lamba string - Processing file filename_02 attemp #0',
+'2025-12-01T10:27:33.182Z | 08504740 | 2025-12-0] 10:27:33 INFO foo lamba string - Successfully processed file filename_01 source foo source',
+'2025-12-01T09:29:33.182Z | 08504740 | 2025-12-01 10:27:33 INFO foo lamba string - Processing file filename_01 attemp #0',
+'2025-12-02110:27:33.182Z | 08504740 | 2025-12-01 10:27:33 INFO foo lamba string - Successfully processed file filename_02 source foo source',
+'2025-12-02T09:29:33.182Z | 08504740 | 2025-12-01 10:27:33 INFO foo lamba string - Processing file filename_02 attemp #0'
 ]
 
-# regex to find ISO-like timestamp fragments
-ISO_RX = re.compile(r'\d{4}-\d{2}-\d{2}[T ]\d{1,2}:\s*\d{2}:\s*\d{2}(?:\.\d+)?Z?')
-
-# regex to find processing / success messages and filename
-EVENT_RX = re.compile(r'\b(Processing|Successfully processed)\s+file\s+([^\s]+)', re.I)
-
-
-def try_parse_timestamp(log_line: str) -> datetime:
-    """
-    Try several heuristics to extract and parse a timestamp from the log line.
-    Returns an aware datetime (UTC).
-    """
-    # first try the part before the first pipe (assumed timestamp field)
-    first_field = log_line.split('|', 1)[0].strip()
-    candidates = [first_field]
-
-    # add any ISO-like matches found anywhere in the line
-    candidates += ISO_RX.findall(log_line)
-
-    for cand in candidates:
-        s = cand.strip()
-        # normalize: replace T with space, Z -> +00:00, remove stray spaces after colons
-        s = s.replace('T', ' ')
-        if s.endswith('Z'):
-            s = s[:-1] + '+00:00'
-        s = re.sub(r':\s+', ':', s)
-        # if date and hour were concatenated like 2025-12-02110:..., insert space
-        s = re.sub(r'^(\d{4}-\d{2}-\d{2})(\d{2}:)', r'\1 \2', s)
-        # some lines may miss seconds; skip those candidates if parse fails
+# helper: robust timestamp parser (best-effort)
+def parse_timestamp(raw_ts):
+    s = raw_ts.strip()
+    # keep only typical timestamp characters
+    s = re.sub(r'[^\dTt Zz:\-\.+]', '', s)
+    # normalize space -> T between date and time if present
+    s = re.sub(r'^(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2}:\d{2})', r'\1T\2', s)
+    # convert trailing Z to +00:00 for fromisoformat
+    if s.endswith('Z'):
+        s = s[:-1] + '+00:00'
+    # try fromisoformat
+    for attempt in (s, s.replace('T', ' '), s.replace('T', '')):
         try:
-            dt = datetime.fromisoformat(s)
+            dt = datetime.fromisoformat(attempt)
+            # make timezone-aware UTC if naive
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt.astimezone(timezone.utc)
         except Exception:
             continue
-    raise ValueError(f"Could not parse timestamp from: {log_line!r}")
-
-
-def extract_events(log_lines):
-    """
-    Returns dict: filename -> list of (timestamp, event_type) sorted by timestamp.
-    event_type is 'processing' or 'success'.
-    """
-    events = {}
-    for line in log_lines:
+    # fallback: try to extract date and time groups manually
+    m = re.search(r'(\d{4}-\d{2}-\d{2}).*?(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)', raw_ts)
+    if m:
+        datepart, timepart = m.groups()
+        candidate = f"{datepart}T{timepart}"
+        if candidate.endswith('Z'):
+            candidate = candidate[:-1] + '+00:00'
         try:
-            ts = try_parse_timestamp(line)
-        except ValueError:
-            # skip lines with no parsable timestamp
-            continue
-        for m in EVENT_RX.finditer(line):
-            action, filename = m.group(1).lower(), m.group(2)
-            etype = 'processing' if 'process' in action and action.startswith('processing') else 'success'
-            events.setdefault(filename, []).append((ts, etype))
-    # sort per file
-    for fname in events:
-        events[fname].sort(key=lambda x: x[0])
-    return events
+            dt = datetime.fromisoformat(candidate)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            pass
+    raise ValueError(f"unparseable timestamp: {raw_ts!r}")
 
+# parse log lines into structured records
+records = []
+for line in logs:
+    parts = [p.strip() for p in line.split('|', 2)]
+    if len(parts) < 3:
+        continue
+    ts_raw, aws_id, msg = parts
+    try:
+        ts = parse_timestamp(ts_raw)
+    except ValueError:
+        # skip unparseable timestamp lines
+        continue
+    records.append({"ts": ts, "aws": aws_id, "msg": msg})
 
-def compute_durations(events):
-    """
-    For each filename compute list of (success_timestamp, duration) between a processing and the next success.
-    Returns dict: filename -> list of (success_ts, timedelta)
-    """
-    results = {}
-    for fname, evs in events.items():
-        out = []
-        last_processing = None
-        for ts, etype in evs:
-            if etype == 'processing':
-                last_processing = ts
-            elif etype == 'success':
-                if last_processing and ts >= last_processing:
-                    out.append((ts, ts - last_processing))
-                    last_processing = None
-                else:
-                    # success without a prior processing (or earlier processing already matched) -> ignore
-                    pass
-        results[fname] = out
-    return results
+# sort by timestamp just in case
+records.sort(key=lambda r: r["ts"])
 
+# detect events and compute durations
+start_re = re.compile(r'Processing file (\S+)', re.IGNORECASE)
+success_re = re.compile(r'Successfully processed file (\S+)', re.IGNORECASE)
 
-if __name__ == "__main__":
-    events = extract_events(logs)
-    durations = compute_durations(events)
+pending = {}   # filename -> list of (start_ts, aws_id)
+results = []   # tuples (filename, start_ts, aws_id, duration_timedelta)
 
-    # print results in the requested format: filename | timestamp | duration
-    for fname, entries in durations.items():
-        for success_ts, delta in entries:
-            # print exactly: filename | timestamp | duration
-            print(f"{fname} | {success_ts.isoformat()} | {str(delta)}")
+for r in records:
+    msg = r["msg"]
+    ts = r["ts"]
+    aws = r["aws"]
+    m_start = start_re.search(msg)
+    if m_start:
+        fname = m_start.group(1)
+        pending.setdefault(fname, []).append((ts, aws))
+        continue
+    m_succ = success_re.search(msg)
+    if m_succ:
+        fname = m_succ.group(1)
+        if fname in pending and pending[fname]:
+            start_ts, start_aws = pending[fname].pop(0)  # FIFO matching
+            duration = ts - start_ts
+            results.append((fname, start_ts, start_aws, duration))
+        else:
+            # unmatched success; ignore or record with None start
+            results.append((fname, None, aws, None))
+
+# print results in requested format: "filename | timestamp | aws_ac_id | duration"
+for fname, start_ts, aws, duration in results:
+    ts_str = start_ts.isoformat() if start_ts else "N/A"
+    dur_str = f"{duration.total_seconds():.3f}s" if duration is not None else "N/A"
+    print(f"{fname} | {ts_str} | {aws} | {dur_str}")
+
+# If you want this functionally reusable, you can extract into a function.
