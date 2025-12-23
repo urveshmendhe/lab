@@ -4,7 +4,7 @@ import re
 # /home/umendhe/git/lab/test.py
 
 logs = [
-'2025-12-01T10:27:33.182Z | 08504740 | 2025-12-0] 10:27:33 INFO foo lamba string - Successfully processed file filename_01 source foo source',
+'2025-12-01T10:27:33.182Z | 08504740 | 2025-12-01 10:27:33 INFO foo lamba string - Successfully processed file filename_01 source foo source',
 '2025-12-01T09:29:33.182Z | 08504740 | 2025-12-01 10:27:33 INFO foo lamba string - Processing file filename_01 attemp #0',
 '2025-12-02110:27:33.182Z | 08504740 | 2025-12-01 10:27:33 INFO foo lamba string - Successfully processed file filename_02 source foo source',
 '2025-12-02T09:29:33.182Z | 08504740 | 2025-12-01 10:27:33 INFO foo lamba string - Processing file filename_02 attemp #0'

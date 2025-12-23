@@ -1,0 +1,71 @@
+{
+    "trigger": {
+        "schedule": {
+            "interval": "15m"
+        }
+    },
+    "input": {
+        "search": {
+            "request": {
+            "search_type": "query_then_fetch",
+            "indices": ["logs-*"],
+            "rest_total_hits_as_int": true,
+            "body": {
+                "query": {
+                "bool": {
+                    "must": [
+                    {
+                        "match": {
+                        "message": "Processing file"
+                        }
+                    },
+                    {
+                        "match": {
+                        "message": "Successfully processed file"
+                        }
+                    }
+                    ],
+                    "filter": {
+                    "range": {
+                        "@timestamp": {
+                        "gte": "now-1d"
+                        }
+                    }
+                    }
+                }
+                },
+                "aggs": {
+                "files": {
+                    "terms": {
+                    "field": "filename.keyword",
+                    "size": 100
+                    },
+                    "aggs": {
+                    "start_time": {
+                        "min": {
+                        "field": "@timestamp"
+                        }
+                    },
+                    "end_time": {
+                        "max": {
+                        "field": "@timestamp"
+                        }
+                    }
+                    }
+                }
+                }
+            }
+            }
+        }
+    },
+    "condition": {
+        "always": {}
+    },
+    "actions": {
+        "log_durations": {
+            "logging": {
+                "text": "File {{ctx.payload.aggregations.files.buckets[0].key}} processed in {{(ctx.payload.aggregations.files.buckets[0].end_time.value - ctx.payload.aggregations.files.buckets[0].start_time.value)}} milliseconds"
+            }
+        }
+    }
+}
