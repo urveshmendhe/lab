@@ -1,6 +1,6 @@
 {
   "trigger": {
-    "schedule": { "interval": "1m" }
+    "schedule": { "interval": "5m" }
   },
   "input": {
     "search": {
@@ -17,7 +17,7 @@
                   def msg = params._source['message'];
                   if (msg == null) return;
 
-                  // Case 1: Processing file filename_01 attemp #0
+                  // 1) Processing file filename_01 attemp #0
                   int pIdx = msg.indexOf('Processing file ');
                   if (pIdx >= 0) {
                     int start = pIdx + 'Processing file '.length();
@@ -28,7 +28,7 @@
                     }
                   }
 
-                  // Case 2: Successfully processed file s3a://.../filename_01 source ...
+                  // 2) Successfully processed file s3a://.../filename_01 source ...
                   int sIdx = msg.indexOf('Successfully processed file ');
                   if (sIdx >= 0) {
                     int lastSlash = msg.lastIndexOf('/');
@@ -71,7 +71,7 @@
             "by_file": {
               "terms": {
                 "field": "file_name",
-                "size": 100
+                "size": 200
               },
               "aggs": {
                 "start": {
@@ -89,7 +89,6 @@
               }
             }
           }
-
         }
       }
     }
@@ -99,7 +98,6 @@
     "script": {
       "lang": "painless",
       "source": """
-        // Run actions only if at least one file has BOTH start & end
         def buckets = ctx.payload.aggregations.by_file.buckets;
         for (def b : buckets) {
           def st = b.start.start_time.value;
@@ -125,18 +123,23 @@
 
           if (st == null || en == null) continue;
 
-          def durationMs = (long)(en - st);
+          long durationMs = (long)(en - st);
 
           out.add([
             "fileName": file,
-            "startEpochMs": st,
-            "endEpochMs": en,
+            "startTime": b.start.start_time.value_as_string,
+            "endTime": b.end.end_time.value_as_string,
             "durationMs": durationMs,
-            "durationMinutes": durationMs / 60000.0
+            "durationMinutes": durationMs / 60000.0,
+            "org": "4444444445",
+            "application": "my-app*"
           ]);
         }
 
-        return ["results": out, "generatedAt": ctx.execution_time];
+        return [
+          "generatedAt": ctx.execution_time,
+          "results": out
+        ];
       """
     }
   },
@@ -145,13 +148,14 @@
     "log_results": {
       "logging": {
         "level": "info",
-        "text": "ETL durations: {{ctx.payload.results}}"
+        "text": "ETL file durations: {{ctx.payload.results}}"
       }
     },
-
     "index_results": {
+      "foreach": "ctx.payload.results",
       "index": {
-        "index": "etl-file-duration-index"
+        "index": "etl-file-duration-index",
+        "doc_id": "{{ctx.payload._value.fileName}}-{{ctx.execution_time}}"
       }
     }
   }
