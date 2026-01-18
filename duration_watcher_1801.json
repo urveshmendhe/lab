@@ -1,0 +1,158 @@
+{
+  "trigger": {
+    "schedule": { "interval": "1m" }
+  },
+  "input": {
+    "search": {
+      "request": {
+        "indices": ["urvesh-index"],
+        "body": {
+          "size": 0,
+          "runtime_mappings": {
+            "file_name": {
+              "type": "keyword",
+              "script": {
+                "lang": "painless",
+                "source": """
+                  def msg = params._source['message'];
+                  if (msg == null) return;
+
+                  // Case 1: Processing file filename_01 attemp #0
+                  int pIdx = msg.indexOf('Processing file ');
+                  if (pIdx >= 0) {
+                    int start = pIdx + 'Processing file '.length();
+                    int end = msg.indexOf(' ', start);
+                    if (end > start) {
+                      emit(msg.substring(start, end));
+                      return;
+                    }
+                  }
+
+                  // Case 2: Successfully processed file s3a://.../filename_01 source ...
+                  int sIdx = msg.indexOf('Successfully processed file ');
+                  if (sIdx >= 0) {
+                    int lastSlash = msg.lastIndexOf('/');
+                    int sourceIdx = msg.indexOf(' source', lastSlash);
+                    if (lastSlash >= 0 && sourceIdx > lastSlash) {
+                      emit(msg.substring(lastSlash + 1, sourceIdx));
+                      return;
+                    }
+                  }
+                """
+              }
+            }
+          },
+          "query": {
+            "bool": {
+              "filter": [
+                { "term": { "cls.org": "4444444445" } },
+                { "wildcard": { "cls.application": "my-app*" } },
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": "now-24h",
+                      "lte": "now"
+                    }
+                  }
+                },
+                {
+                  "bool": {
+                    "should": [
+                      { "match_phrase": { "message": "Processing file" } },
+                      { "match_phrase": { "message": "Successfully processed file" } }
+                    ],
+                    "minimum_should_match": 1
+                  }
+                }
+              ]
+            }
+          },
+          "aggs": {
+            "by_file": {
+              "terms": {
+                "field": "file_name",
+                "size": 100
+              },
+              "aggs": {
+                "start": {
+                  "filter": { "match_phrase": { "message": "Processing file" } },
+                  "aggs": {
+                    "start_time": { "min": { "field": "@timestamp" } }
+                  }
+                },
+                "end": {
+                  "filter": { "match_phrase": { "message": "Successfully processed file" } },
+                  "aggs": {
+                    "end_time": { "max": { "field": "@timestamp" } }
+                  }
+                }
+              }
+            }
+          }
+
+        }
+      }
+    }
+  },
+
+  "condition": {
+    "script": {
+      "lang": "painless",
+      "source": """
+        // Run actions only if at least one file has BOTH start & end
+        def buckets = ctx.payload.aggregations.by_file.buckets;
+        for (def b : buckets) {
+          def st = b.start.start_time.value;
+          def en = b.end.end_time.value;
+          if (st != null && en != null) return true;
+        }
+        return false;
+      """
+    }
+  },
+
+  "transform": {
+    "script": {
+      "lang": "painless",
+      "source": """
+        def out = [];
+        def buckets = ctx.payload.aggregations.by_file.buckets;
+
+        for (def b : buckets) {
+          def file = b.key;
+          def st = b.start.start_time.value;
+          def en = b.end.end_time.value;
+
+          if (st == null || en == null) continue;
+
+          def durationMs = (long)(en - st);
+
+          out.add([
+            "fileName": file,
+            "startEpochMs": st,
+            "endEpochMs": en,
+            "durationMs": durationMs,
+            "durationMinutes": durationMs / 60000.0
+          ]);
+        }
+
+        return ["results": out, "generatedAt": ctx.execution_time];
+      """
+    }
+  },
+
+  "actions": {
+    "log_results": {
+      "logging": {
+        "level": "info",
+        "text": "ETL durations: {{ctx.payload.results}}"
+      }
+    },
+
+    "index_results": {
+      "index": {
+        "index": "etl-file-duration-index"
+      }
+    }
+  }
+}
