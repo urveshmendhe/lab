@@ -1,5 +1,6 @@
 {
   "trigger": { "schedule": { "interval": "5m" } },
+
   "input": {
     "search": {
       "request": {
@@ -72,54 +73,82 @@
       }
     }
   },
+
   "condition": {
     "script": {
       "lang": "painless",
       "source": """
+        double THRESHOLD_MIN = 30.0;
+
         for (def b : ctx.payload.aggregations.by_file.buckets) {
-          if (b.start.start_time.value != null && b.end.end_time.value != null) return true;
+          def st = b.start.start_time.value;
+          def en = b.end.end_time.value;
+          if (st == null || en == null) continue;
+
+          double durMin = (en - st) / 60000.0;
+          if (durMin > THRESHOLD_MIN) return true;
         }
         return false;
       """
     }
   },
+
   "transform": {
     "script": {
       "lang": "painless",
       "source": """
-        def out = [];
+        double THRESHOLD_MIN = 30.0;
+
+        def all = [];
+        def slow = [];
+
         for (def b : ctx.payload.aggregations.by_file.buckets) {
           def st = b.start.start_time.value;
           def en = b.end.end_time.value;
           if (st == null || en == null) continue;
 
           long durMs = (long)(en - st);
+          double durMin = durMs / 60000.0;
 
-          out.add([
+          def row = [
             "generatedAt": ctx.execution_time,
             "fileName": b.key,
             "startTime": b.start.start_time.value_as_string,
             "endTime": b.end.end_time.value_as_string,
             "durationMs": durMs,
-            "durationMinutes": durMs / 60000.0,
+            "durationMinutes": durMin,
+            "thresholdMinutes": THRESHOLD_MIN,
             "org": "4444444445",
             "application": "my-app*"
-          ]);
+          ];
+
+          all.add(row);
+          if (durMin > THRESHOLD_MIN) slow.add(row);
         }
-        return ["results": out];
+
+        return [
+          "allResults": all,
+          "slowResults": slow,
+          "thresholdMinutes": THRESHOLD_MIN
+        ];
       """
     }
   },
+
   "actions": {
-    "index_results": {
-      "foreach": "ctx.payload.results",
+    "log_slow_files": {
+      "logging": {
+        "level": "warn",
+        "text": "ALERT: ETL duration exceeded {{ctx.payload.thresholdMinutes}} minutes. Slow files: {{ctx.payload.slowResults}}"
+      }
+    },
+    "index_all_durations": {
+      "foreach": "ctx.payload.allResults",
       "index": { "index": "etl-file-duration-index" }
     },
-    "log_results": {
-      "logging": {
-        "level": "info",
-        "text": "ETL durations: {{ctx.payload.results}}"
-      }
+    "index_slow_durations": {
+      "foreach": "ctx.payload.slowResults",
+      "index": { "index": "etl-file-duration-alerts" }
     }
   }
 }
