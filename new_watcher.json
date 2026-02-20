@@ -1,12 +1,8 @@
 {
   "trigger": {
-    "schedule": { "interval": "24h" }
-  },
-  "metadata": {
-    "org": "085047404459",
-    "environment": "reporting-pipelines-spark-cluster",
-    "source_index": "*-cloudwatch-*",
-    "target_index": "reporting-cloud-data-pipeline"
+    "schedule": {
+      "interval": "24h"
+    }
   },
   "input": {
     "chain": {
@@ -15,12 +11,19 @@
           "latest_success": {
             "search": {
               "request": {
-                "indices": [ "*-cloudwatch-*" ],
+                "search_type": "query_then_fetch",
+                "indices": [
+                  "*-cloudwatch-*"
+                ],
                 "rest_total_hits_as_int": true,
                 "body": {
                   "size": 1,
                   "sort": [
-                    { "@timestamp": { "order": "desc" } }
+                    {
+                      "@timestamp": {
+                        "order": "desc"
+                      }
+                    }
                   ],
                   "_source": [
                     "@timestamp",
@@ -31,8 +34,16 @@
                   "query": {
                     "bool": {
                       "filter": [
-                        { "term": { "cls.organization.keyword": "085047404459" } },
-                        { "term": { "record.environment.keyword": "reporting-pipelines-spark-cluster" } },
+                        {
+                          "term": {
+                            "cls.organization.keyword": "085047404459"
+                          }
+                        },
+                        {
+                          "term": {
+                            "record.environment.keyword": "reporting-pipelines-spark-cluster"
+                          }
+                        },
                         {
                           "match_phrase": {
                             "record.message": "Successfully processed file"
@@ -50,47 +61,60 @@
           "extract_file_and_time": {
             "transform": {
               "script": {
-                "lang": "painless",
                 "source": """
-                  if (ctx.payload.latest_success.hits.total == 0) return ['found': false];
+                  if (ctx.payload.latest_success == null ||
+                      ctx.payload.latest_success.hits == null ||
+                      ctx.payload.latest_success.hits.hits == null ||
+                      ctx.payload.latest_success.hits.hits.size() == 0) {
+                    return ['found': false];
+                  }
 
                   def hit = ctx.payload.latest_success.hits.hits[0];
-                  def msg = hit._source.containsKey('record') && hit._source.record != null ? hit._source.record.message : hit._source['record.message'];
+                  def src = hit.get('_source');
+                  if (src == null) return ['found': false];
+
+                  // Safe get message (supports nested record.message or flattened record.message)
+                  def msg = null;
+                  def rec = src.get('record');
+                  if (rec != null && rec instanceof java.util.Map) {
+                    msg = ((java.util.Map)rec).get('message');
+                  }
+                  if (msg == null) msg = src.get('record.message');
                   if (msg == null) msg = '';
 
                   // Parse leading datetime in message: "YYYY-MM-DD HH:MM:SS"
                   def successMillis = null;
-                  def mTime = /^(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})/.matcher(msg);
-                  if (mTime.find()) {
-                    def dt = mTime.group(1).replace(' ', 'T') + 'Z';
+                  def mt = /^(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})/.matcher(msg);
+                  if (mt.find()) {
+                    def dt = mt.group(1).replace(' ', 'T') + 'Z';
                     try { successMillis = java.time.Instant.parse(dt).toEpochMilli(); } catch (Exception e) {}
                   }
+
+                  // fallback to @timestamp
                   if (successMillis == null) {
-                    // fallback to @timestamp
-                    def ts = hit._source['@timestamp'];
+                    def ts = src.get('@timestamp');
                     if (ts != null) {
                       try { successMillis = java.time.Instant.parse(ts.toString()).toEpochMilli(); } catch (Exception e) {}
                     }
                   }
 
-                  // Extract the s3 path after "Successfully processed file "
+                  // Extract filename from "Successfully processed file <pathOrFile>"
                   def fileName = null;
-                  def mFile = /Successfully processed file\\s+(\\S+)/.matcher(msg);
-                  if (mFile.find()) {
-                    def path = mFile.group(1);
-                    // take last segment after '/'
+                  def mf = /Successfully processed file\\s+(\\S+)/.matcher(msg);
+                  if (mf.find()) {
+                    def path = mf.group(1);
                     int idx = path.lastIndexOf('/');
                     fileName = idx >= 0 ? path.substring(idx + 1) : path;
                   }
 
                   return [
                     'found': true,
-                    'success_doc': hit,
                     'success_message': msg,
                     'success_millis': successMillis,
                     'file_name': fileName
                   ];
-                """
+                """,
+                "lang": "painless"
               }
             }
           }
@@ -99,12 +123,19 @@
           "latest_attempt_for_file": {
             "search": {
               "request": {
-                "indices": [ "*-cloudwatch-*" ],
+                "search_type": "query_then_fetch",
+                "indices": [
+                  "*-cloudwatch-*"
+                ],
                 "rest_total_hits_as_int": true,
                 "body": {
                   "size": 1,
                   "sort": [
-                    { "@timestamp": { "order": "desc" } }
+                    {
+                      "@timestamp": {
+                        "order": "desc"
+                      }
+                    }
                   ],
                   "_source": [
                     "@timestamp",
@@ -115,14 +146,22 @@
                   "query": {
                     "bool": {
                       "filter": [
-                        { "term": { "cls.organization.keyword": "085047404459" } },
-                        { "term": { "record.environment.keyword": "reporting-pipelines-spark-cluster" } }
+                        {
+                          "term": {
+                            "cls.organization.keyword": "085047404459"
+                          }
+                        },
+                        {
+                          "term": {
+                            "record.environment.keyword": "reporting-pipelines-spark-cluster"
+                          }
+                        }
                       ],
                       "must": [
                         {
                           "query_string": {
                             "default_field": "record.message",
-                            "query": "Processing\\ file\\ {{ctx.payload.extract_file_and_time.file_name}}\\ attempt*"
+                            "query": """Processing\ file\ {{ctx.payload.extract_file_and_time.file_name}}\ attempt*"""
                           }
                         }
                       ]
@@ -137,47 +176,63 @@
           "final_transform": {
             "transform": {
               "script": {
-                "lang": "painless",
                 "source": """
-                  // Guardrails
-                  if (ctx.payload.extract_file_and_time.found != true) return ['ok': false, 'reason': 'No success log found'];
-                  if (ctx.payload.extract_file_and_time.file_name == null) return ['ok': false, 'reason': 'Could not extract file name from success message'];
-                  if (ctx.payload.latest_attempt_for_file.hits.total == 0) return ['ok': false, 'reason': 'No attempt log found for extracted file'];
+                  if (ctx.payload.extract_file_and_time == null || ctx.payload.extract_file_and_time.found != true) {
+                    return ['ok': false, 'reason': 'No success log found'];
+                  }
 
-                  def succHit = ctx.payload.extract_file_and_time.success_doc;
+                  def fileName = ctx.payload.extract_file_and_time.file_name;
+                  if (fileName == null) return ['ok': false, 'reason': 'Could not extract file name'];
+
+                  if (ctx.payload.latest_attempt_for_file == null ||
+                      ctx.payload.latest_attempt_for_file.hits == null ||
+                      ctx.payload.latest_attempt_for_file.hits.hits == null ||
+                      ctx.payload.latest_attempt_for_file.hits.hits.size() == 0) {
+                    return ['ok': false, 'reason': 'No attempt log found for extracted file'];
+                  }
+
                   def succMsg = ctx.payload.extract_file_and_time.success_message;
                   def succMillis = ctx.payload.extract_file_and_time.success_millis;
-                  def fileName = ctx.payload.extract_file_and_time.file_name;
 
                   def attHit = ctx.payload.latest_attempt_for_file.hits.hits[0];
-                  def attMsg = attHit._source.containsKey('record') && attHit._source.record != null ? attHit._source.record.message : attHit._source['record.message'];
+                  def attSrc = attHit.get('_source');
+                  if (attSrc == null) return ['ok': false, 'reason': 'Attempt hit missing _source'];
 
-                  // Parse attempt millis from message leading datetime, fallback to @timestamp
+                  def attMsg = null;
+                  def rec = attSrc.get('record');
+                  if (rec != null && rec instanceof java.util.Map) {
+                    attMsg = ((java.util.Map)rec).get('message');
+                  }
+                  if (attMsg == null) attMsg = attSrc.get('record.message');
+                  if (attMsg == null) attMsg = '';
+
                   def attemptMillis = null;
-                  def mTime = /^(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})/.matcher(attMsg != null ? attMsg : '');
-                  if (mTime.find()) {
-                    def dt = mTime.group(1).replace(' ', 'T') + 'Z';
+                  def mt = /^(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})/.matcher(attMsg);
+                  if (mt.find()) {
+                    def dt = mt.group(1).replace(' ', 'T') + 'Z';
                     try { attemptMillis = java.time.Instant.parse(dt).toEpochMilli(); } catch (Exception e) {}
                   }
                   if (attemptMillis == null) {
-                    def ts = attHit._source['@timestamp'];
+                    def ts = attSrc.get('@timestamp');
                     if (ts != null) {
                       try { attemptMillis = java.time.Instant.parse(ts.toString()).toEpochMilli(); } catch (Exception e) {}
                     }
                   }
 
-                  if (succMillis == null || attemptMillis == null) return ['ok': false, 'reason': 'Could not parse timestamps'];
+                  if (succMillis == null || attemptMillis == null) {
+                    return ['ok': false, 'reason': 'Could not parse timestamps'];
+                  }
 
-                  // Ensure attempt <= success, otherwise duration is suspicious (ingest ordering). If it happens, set duration to null.
-                  Long durationMs = succMillis - attemptMillis;
+                  def durationMs = (long)(succMillis - attemptMillis);
                   if (durationMs < 0) durationMs = null;
 
-                  def durationSec = durationMs != null ? (durationMs / 1000L) : null;
+                  def durationSec = durationMs != null ? (long)(durationMs / 1000L) : null;
+
                   def durationHuman = null;
                   if (durationSec != null) {
                     long s = durationSec;
-                    long h = s / 3600; s = s % 3600;
-                    long m = s / 60;   s = s % 60;
+                    long h = (long)(s / 3600L); s = s % 3600L;
+                    long m = (long)(s / 60L);   s = s % 60L;
                     durationHuman = (h > 0 ? h + 'h ' : '') + (m > 0 ? m + 'm ' : '') + s + 's';
                   }
 
@@ -194,7 +249,8 @@
                     'duration_human': durationHuman,
                     'watch_execution_time': ctx.execution_time
                   ];
-                """
+                """,
+                "lang": "painless"
               }
             }
           }
@@ -204,22 +260,27 @@
   },
   "condition": {
     "script": {
-      "lang": "painless",
-      "source": "return ctx.payload.final_transform.ok == true && ctx.payload.final_transform.duration_ms != null;"
+      "source": "return ctx.payload.final_transform.ok == true && ctx.payload.final_transform.duration_ms != null;",
+      "lang": "painless"
     }
   },
   "actions": {
     "index_duration_doc": {
       "index": {
-        "index": "reporting-cloud-data-pipeline",
-        "doc_type": "_doc"
+        "index": "reporting-cloud-data-pipeline"
       }
     }
   },
+  "metadata": {
+    "target_index": "reporting-cloud-data-pipeline",
+    "environment": "reporting-pipelines-spark-cluster",
+    "org": "085047404459",
+    "source_index": "*-cloudwatch-*"
+  },
   "transform": {
     "script": {
-      "lang": "painless",
-      "source": "return ctx.payload.final_transform;"
+      "source": "return ctx.payload.final_transform;",
+      "lang": "painless"
     }
   }
 }
