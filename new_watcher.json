@@ -34,19 +34,22 @@
                   "query": {
                     "bool": {
                       "filter": [
+                            {
+                            "range": {
+                                "@timestamp": {
+                                    "gte": "now-24h",
+                                    "lte": "now"
+                                }
+                             }
+                            },
+                            { "term": { "cls.organization.keyword": "085047404459" } },
+                            { "term": { "record.environment.keyword": "reporting-pipelines-spark-cluster" } }
+                    ],
+                      "must": [
                         {
-                          "term": {
-                            "cls.organization.keyword": "085047404459"
-                          }
-                        },
-                        {
-                          "term": {
-                            "record.environment.keyword": "reporting-pipelines-spark-cluster"
-                          }
-                        },
-                        {
-                          "match_phrase": {
-                            "record.message": "Successfully processed file"
+                          "query_string": {
+                            "default_field": "record.message",
+                            "query": """Successfully\ processed\ file\ *"""
                           }
                         }
                       ]
