@@ -1,8 +1,12 @@
 {
   "trigger": {
-    "schedule": {
-      "interval": "24h"
-    }
+    "schedule": { "interval": "24h" }
+  },
+  "metadata": {
+    "org": "085047404459",
+    "environment_suffix": "reporting-pipelines-spark-cluster",
+    "source_index": "*-cloudwatch-*",
+    "target_index": "reporting-cloud-data-pipeline"
   },
   "input": {
     "chain": {
@@ -11,47 +15,31 @@
           "latest_success": {
             "search": {
               "request": {
-                "search_type": "query_then_fetch",
-                "indices": [
-                  "*-cloudwatch-*"
-                ],
-                "rest_total_hits_as_int": true,
+                "indices": [ "*-cloudwatch-*" ],
                 "body": {
                   "size": 1,
-                  "sort": [
-                    {
-                      "@timestamp": {
-                        "order": "desc"
-                      }
-                    }
-                  ],
-                  "_source": [
-                    "@timestamp",
-                    "cls.organization",
-                    "record.environment",
-                    "record.message"
-                  ],
+                  "sort": [ { "@timestamp": { "order": "desc" } } ],
+                  "_source": [ "@timestamp", "cls.organization", "record.environment", "record.message" ],
                   "query": {
                     "bool": {
                       "filter": [
-                            {
-                            "range": {
-                                "@timestamp": {
-                                    "gte": "now-24h",
-                                    "lte": "now"
-                                }
-                             }
-                            },
-                            { "term": { "cls.organization.keyword": "085047404459" } },
-                            { "term": { "record.environment.keyword": "reporting-pipelines-spark-cluster" } }
-                    ],
-                      "must": [
                         {
-                          "query_string": {
-                            "default_field": "record.message",
-                            "query": """Successfully\ processed\ file\ *"""
+                          "range": {
+                            "@timestamp": {
+                              "gte": "now-24h",
+                              "lte": "now"
+                            }
                           }
-                        }
+                        },
+                        { "term": { "cls.organization.keyword": "085047404459" } },
+                        {
+                          "wildcard": {
+                            "record.environment.keyword": {
+                              "value": "*reporting-pipelines-spark-cluster"
+                            }
+                          }
+                        },
+                        { "match_phrase": { "record.message": "Successfully processed file" } }
                       ]
                     }
                   }
@@ -64,6 +52,7 @@
           "extract_file_and_time": {
             "transform": {
               "script": {
+                "lang": "painless",
                 "source": """
                   if (ctx.payload.latest_success == null ||
                       ctx.payload.latest_success.hits == null ||
@@ -76,7 +65,7 @@
                   def src = hit.get('_source');
                   if (src == null) return ['found': false];
 
-                  // Safe get message (supports nested record.message or flattened record.message)
+                  // Safe read record.message (supports nested 'record':{message:""} or flattened 'record.message')
                   def msg = null;
                   def rec = src.get('record');
                   if (rec != null && rec instanceof java.util.Map) {
@@ -85,20 +74,19 @@
                   if (msg == null) msg = src.get('record.message');
                   if (msg == null) msg = '';
 
-                  // Parse leading datetime in message: "YYYY-MM-DD HH:MM:SS"
+                  // Prefer @timestamp string for range-lte on attempt query
+                  def successTs = src.get('@timestamp');
+
+                  // Parse leading datetime in message: "YYYY-MM-DD HH:MM:SS" (UTC assumed)
                   def successMillis = null;
                   def mt = /^(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})/.matcher(msg);
                   if (mt.find()) {
                     def dt = mt.group(1).replace(' ', 'T') + 'Z';
                     try { successMillis = java.time.Instant.parse(dt).toEpochMilli(); } catch (Exception e) {}
                   }
-
                   // fallback to @timestamp
-                  if (successMillis == null) {
-                    def ts = src.get('@timestamp');
-                    if (ts != null) {
-                      try { successMillis = java.time.Instant.parse(ts.toString()).toEpochMilli(); } catch (Exception e) {}
-                    }
+                  if (successMillis == null && successTs != null) {
+                    try { successMillis = java.time.Instant.parse(successTs.toString()).toEpochMilli(); } catch (Exception e) {}
                   }
 
                   // Extract filename from "Successfully processed file <pathOrFile>"
@@ -114,10 +102,10 @@
                     'found': true,
                     'success_message': msg,
                     'success_millis': successMillis,
+                    'success_ts': successTs,
                     'file_name': fileName
                   ];
-                """,
-                "lang": "painless"
+                """
               }
             }
           }
@@ -126,37 +114,28 @@
           "latest_attempt_for_file": {
             "search": {
               "request": {
-                "search_type": "query_then_fetch",
-                "indices": [
-                  "*-cloudwatch-*"
-                ],
-                "rest_total_hits_as_int": true,
+                "indices": [ "*-cloudwatch-*" ],
                 "body": {
                   "size": 1,
-                  "sort": [
-                    {
-                      "@timestamp": {
-                        "order": "desc"
-                      }
-                    }
-                  ],
-                  "_source": [
-                    "@timestamp",
-                    "cls.organization",
-                    "record.environment",
-                    "record.message"
-                  ],
+                  "sort": [ { "@timestamp": { "order": "desc" } } ],
+                  "_source": [ "@timestamp", "cls.organization", "record.environment", "record.message" ],
                   "query": {
                     "bool": {
                       "filter": [
                         {
-                          "term": {
-                            "cls.organization.keyword": "085047404459"
+                          "range": {
+                            "@timestamp": {
+                              "gte": "now-24h",
+                              "lte": "{{ctx.payload.extract_file_and_time.success_ts}}"
+                            }
                           }
                         },
+                        { "term": { "cls.organization.keyword": "085047404459" } },
                         {
-                          "term": {
-                            "record.environment.keyword": "reporting-pipelines-spark-cluster"
+                          "wildcard": {
+                            "record.environment.keyword": {
+                              "value": "*reporting-pipelines-spark-cluster"
+                            }
                           }
                         }
                       ],
@@ -164,7 +143,7 @@
                         {
                           "query_string": {
                             "default_field": "record.message",
-                            "query": """Processing\ file\ {{ctx.payload.extract_file_and_time.file_name}}\ attempt*"""
+                            "query": "Processing\\ file\\ {{ctx.payload.extract_file_and_time.file_name}}\\ attempt*"
                           }
                         }
                       ]
@@ -179,19 +158,20 @@
           "final_transform": {
             "transform": {
               "script": {
+                "lang": "painless",
                 "source": """
                   if (ctx.payload.extract_file_and_time == null || ctx.payload.extract_file_and_time.found != true) {
-                    return ['ok': false, 'reason': 'No success log found'];
+                    return ['ok': false, 'reason': 'No success log found in last 24h'];
                   }
 
                   def fileName = ctx.payload.extract_file_and_time.file_name;
-                  if (fileName == null) return ['ok': false, 'reason': 'Could not extract file name'];
+                  if (fileName == null) return ['ok': false, 'reason': 'Could not extract file name from success message'];
 
                   if (ctx.payload.latest_attempt_for_file == null ||
                       ctx.payload.latest_attempt_for_file.hits == null ||
                       ctx.payload.latest_attempt_for_file.hits.hits == null ||
                       ctx.payload.latest_attempt_for_file.hits.hits.size() == 0) {
-                    return ['ok': false, 'reason': 'No attempt log found for extracted file'];
+                    return ['ok': false, 'reason': 'No attempt log found for extracted file (last 24h, up to success ts)'];
                   }
 
                   def succMsg = ctx.payload.extract_file_and_time.success_message;
@@ -201,6 +181,7 @@
                   def attSrc = attHit.get('_source');
                   if (attSrc == null) return ['ok': false, 'reason': 'Attempt hit missing _source'];
 
+                  // Safe get attempt message
                   def attMsg = null;
                   def rec = attSrc.get('record');
                   if (rec != null && rec instanceof java.util.Map) {
@@ -209,6 +190,7 @@
                   if (attMsg == null) attMsg = attSrc.get('record.message');
                   if (attMsg == null) attMsg = '';
 
+                  // Parse attempt millis from message leading datetime, fallback to @timestamp
                   def attemptMillis = null;
                   def mt = /^(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})/.matcher(attMsg);
                   if (mt.find()) {
@@ -223,7 +205,7 @@
                   }
 
                   if (succMillis == null || attemptMillis == null) {
-                    return ['ok': false, 'reason': 'Could not parse timestamps'];
+                    return ['ok': false, 'reason': 'Could not parse timestamps'};
                   }
 
                   def durationMs = (long)(succMillis - attemptMillis);
@@ -242,7 +224,7 @@
                   return [
                     'ok': true,
                     'org': ctx.metadata.org,
-                    'environment': ctx.metadata.environment,
+                    'environment_suffix': ctx.metadata.environment_suffix,
                     'file_name': fileName,
                     'attempt_message': attMsg,
                     'success_message': succMsg,
@@ -252,8 +234,7 @@
                     'duration_human': durationHuman,
                     'watch_execution_time': ctx.execution_time
                   ];
-                """,
-                "lang": "painless"
+                """
               }
             }
           }
@@ -263,8 +244,14 @@
   },
   "condition": {
     "script": {
-      "source": "return ctx.payload.final_transform.ok == true && ctx.payload.final_transform.duration_ms != null;",
-      "lang": "painless"
+      "lang": "painless",
+      "source": "return ctx.payload.final_transform.ok == true && ctx.payload.final_transform.duration_ms != null;"
+    }
+  },
+  "transform": {
+    "script": {
+      "lang": "painless",
+      "source": "return ctx.payload.final_transform;"
     }
   },
   "actions": {
@@ -272,18 +259,6 @@
       "index": {
         "index": "reporting-cloud-data-pipeline"
       }
-    }
-  },
-  "metadata": {
-    "target_index": "reporting-cloud-data-pipeline",
-    "environment": "reporting-pipelines-spark-cluster",
-    "org": "085047404459",
-    "source_index": "*-cloudwatch-*"
-  },
-  "transform": {
-    "script": {
-      "source": "return ctx.payload.final_transform;",
-      "lang": "painless"
     }
   }
 }
