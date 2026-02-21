@@ -1,4 +1,10 @@
 {
+  "metadata": {
+    "organization": "085047404459",
+    "environment_pattern": "*reporting-pipelines-spark-cluster",
+    "lookback_days": "2d",
+    "target_index": "reporting-pipelines-spark-cluster"
+  },
   "trigger": {
     "schedule": {
       "interval": "24h"
@@ -16,19 +22,19 @@
                 {
                   "range": {
                     "@timestamp": {
-                      "gte": "now-2d",
+                      "gte": "now-{{ctx.metadata.lookback_days}}",
                       "lte": "now"
                     }
                   }
                 },
                 {
                   "term": {
-                    "cls.organization.keyword": "085047404459"
+                    "cls.organization.keyword": "{{ctx.metadata.organization}}"
                   }
                 },
                 {
                   "wildcard": {
-                    "record.environment.keyword": "*reporting-pipelines-spark-cluster"
+                    "record.environment.keyword": "{{ctx.metadata.environment_pattern}}"
                   }
                 },
                 {
@@ -112,7 +118,6 @@
             long durationMs = endMs - startMs;
             double durationSeconds = durationMs / 1000.0;
             
-            // Calculate human-readable duration
             long totalSeconds = durationMs / 1000;
             long hours = totalSeconds / 3600;
             long minutes = (totalSeconds % 3600) / 60;
