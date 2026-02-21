@@ -3,6 +3,7 @@
     "organization": "085047404459",
     "environment_pattern": "*reporting-pipelines-spark-cluster",
     "lookback_days": "2d",
+    "source_index": "123-cloudwatch-123",
     "target_index": "reporting-pipelines-spark-cluster"
   },
   "trigger": {
@@ -13,7 +14,7 @@
   "input": {
     "search": {
       "request": {
-        "indices": ["*-cloudwatch-*"],
+        "indices": "{{ctx.metadata.source_index}}",
         "body": {
           "size": 10000,
           "query": {
@@ -168,7 +169,7 @@
       "foreach": "ctx.payload.results",
       "max_iterations": 1000,
       "index": {
-        "index": "reporting-pipelines-spark-cluster"
+        "index": "{{ctx.metadata.target_index}}"
       }
     }
   }
