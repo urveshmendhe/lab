@@ -1,14 +1,14 @@
 {
   "metadata": {
     "_description": "Calculates ETL file processing duration from CloudWatch logs",
-    "_author": "UrveshMendhe@discove.com",
+    "_author": "Urvesh Mendhe (CPM)",
     "_version": "1.0",
     "_last_updated": "2026-02-21",
     "_notes": [
       "Runs every 24 hours",
       "Scans last 2 days of logs",
       "Writes results to reporting-pipelines-spark-cluster index",
-      "Re-usable watcher - change values in metadata"
+      "Re-usable watcher - update values in metadata"
     ],
     "organization": "085047404459",
     "environment_pattern": "*reporting-pipelines-spark-cluster",
