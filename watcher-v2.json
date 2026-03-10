@@ -1,0 +1,233 @@
+{
+  "metadata": {
+    "_description": "Calculates ETL file processing duration from CloudWatch logs",
+    "_author": "Urvesh Mendhe (Discover CPM Team - Ana Cano)",
+    "_version": "2.0",
+    "_last_updated": "2026-03-10",
+    "_notes": [
+      "Runs every 24 hours",
+      "Scans last 24 hours of logs",
+      "Writes results to reporting-pipelines-spark-cluster index",
+      "Writes alerts to moogsoft-alerts index",
+      "Re-usable watcher - update values in metadata"
+    ],
+    "organization": "085047404459",
+    "lookback_period": "24h"
+  },
+  "trigger": {
+    "schedule": {
+      "interval": "24h"
+    }
+  },
+  "input": {
+    "search": {
+      "request": {
+        "indices": ["cloudwatch-*"],
+        "body": {
+          "size": 10000,
+          "query": {
+            "bool": {
+              "must": [
+                {
+                  "range": {
+                    "@timestamp": {
+                      "gte": "now-{{ctx.metadata.lookback_period}}",
+                      "lte": "now"
+                    }
+                  }
+                },
+                {
+                  "term": {
+                    "cls.organization.keyword": "{{ctx.metadata.organization}}"
+                  }
+                },
+               
+                {
+                  "bool": {
+                    "should": [
+                      { "match_phrase": { "record.message": "Processing file" } },
+                      { "match_phrase": { "record.message": "Successfully processed file" } }
+                    ],
+                    "minimum_should_match": 1
+                  }
+                }
+              ]
+            }
+          },
+          "sort": [{ "@timestamp": "asc" }],
+          "_source": ["@timestamp", "record.message", "cls.organization"]
+        }
+      }
+    }
+  },
+  "condition": {
+    "compare": {
+      "ctx.payload.hits.total": {
+        "gt": 0
+      }
+    }
+  },
+  "transform": {
+    "script": {
+      "source": """
+        Map fileEvents = new HashMap();
+        List results = new ArrayList();
+        List moogsoft_results = new ArrayList();
+        def now = ctx.execution_time.toString();
+        
+        if (ctx.payload.hits == null || ctx.payload.hits.hits == null || ctx.payload.hits.hits.size() == 0) {
+          Map payload = new HashMap();
+          payload.put('results', results);
+          payload.put('moogsoft_results', moogsoft_results);
+          return payload;
+        }
+        
+        for (int i = 0; i < ctx.payload.hits.hits.size(); i++) {
+          Map hit = ctx.payload.hits.hits.get(i);
+          Map source = (Map)hit.get('_source');
+          String timestamp = source.get('@timestamp').toString();
+          long timestampMs = ((Number)((List)hit.get('sort')).get(0)).longValue();
+          Map record = (Map)source.get('record');
+          String message = record.get('message').toString();
+          Map cls = (Map)source.get('cls');
+          String organization = cls.get('organization').toString();
+          
+          String filename = null;
+          
+          if (message.indexOf('Processing file') >= 0 && message.indexOf('attempt') >= 0) {
+            int startIdx = message.indexOf('Processing file') + 16;
+            int endIdx = message.indexOf(' attempt');
+            if (endIdx > startIdx) {
+              filename = message.substring(startIdx, endIdx);
+              if (message.indexOf('attempt #0') >= 0) {
+                if (!fileEvents.containsKey(filename)) {
+                  Map eventData = new HashMap();
+                  eventData.put('start', timestamp);
+                  eventData.put('startMs', Long.valueOf(timestampMs));
+                  eventData.put('organization', organization);
+                  fileEvents.put(filename, eventData);
+                }
+              }
+            }
+          }
+          
+          if (message.indexOf('Successfully processed file') >= 0) {
+            int s3aIdx = message.indexOf('s3a://');
+            int withSourceIdx = message.indexOf(' with source');
+            if (s3aIdx >= 0 && withSourceIdx > s3aIdx) {
+              String s3Path = message.substring(s3aIdx, withSourceIdx);
+              int lastSlash = s3Path.lastIndexOf('/');
+              if (lastSlash >= 0) {
+                filename = s3Path.substring(lastSlash + 1);
+                if (fileEvents.containsKey(filename)) {
+                  Map eventData = (Map)fileEvents.get(filename);
+                  eventData.put('end', timestamp);
+                  eventData.put('endMs', Long.valueOf(timestampMs));
+                }
+              }
+            }
+          }
+        }
+        
+        for (entry in fileEvents.entrySet()) {
+          String filename = entry.getKey();
+          Map data = (Map)entry.getValue();
+          
+          if (data.containsKey('startMs') && data.containsKey('endMs')) {
+            long startMs = ((Number)data.get('startMs')).longValue();
+            long endMs = ((Number)data.get('endMs')).longValue();
+            long durationMs = endMs - startMs;
+            double durationSeconds = durationMs / 1000.0;
+            
+            long totalSeconds = durationMs / 1000;
+            long hours = totalSeconds / 3600;
+            long minutes = (totalSeconds % 3600) / 60;
+            long seconds = totalSeconds % 60;
+            long millis = durationMs % 1000;
+            
+            StringBuilder durationHuman = new StringBuilder();
+            if (hours > 0) {
+              durationHuman.append(hours).append('h ');
+            }
+            if (minutes > 0 || hours > 0) {
+              durationHuman.append(minutes).append('m ');
+            }
+            durationHuman.append(seconds).append('s');
+            if (millis > 0) {
+              durationHuman.append(' ').append(millis).append('ms');
+            }
+            
+            String durationHumanStr = durationHuman.toString().trim();
+            String startTime = data.get('start').toString();
+            String endTime = data.get('end').toString();
+            String organization = data.get('organization').toString();
+            
+            Map result = new HashMap();
+            result.put('filename', filename);
+            result.put('start_time', startTime);
+            result.put('end_time', endTime);
+            result.put('duration_ms', Long.valueOf(durationMs));
+            result.put('duration_seconds', Double.valueOf(durationSeconds));
+            result.put('duration_human', durationHumanStr);
+            result.put('organization', organization);
+            result.put('calculated_at', now);
+            results.add(result);
+            
+            Map moogsoft = new HashMap();
+            moogsoft.put('application', 'ETL-File-Processing');
+            moogsoft.put('organization', organization);
+            moogsoft.put('severity', 'info');
+            moogsoft.put('assignment_group', 'DataOps');
+            moogsoft.put('hostname', 'ETL-Processing-Watcher');
+            moogsoft.put('custom_1', filename);
+            moogsoft.put('custom_2', durationHumanStr);
+            moogsoft.put('custom_3', startTime);
+            moogsoft.put('custom_4', endTime);
+            moogsoft.put('custom_5', String.valueOf(durationSeconds));
+            moogsoft.put('watcher_id', 'etl-file-processing-duration');
+            moogsoft.put('eventclass', 'ETL_Processing_Complete');
+            moogsoft.put('description', 'ETL file ' + filename + ' processed in ' + durationHumanStr);
+            moogsoft.put('@timestamp', now);
+            moogsoft_results.add(moogsoft);
+          }
+        }
+        
+        Map payload = new HashMap();
+        payload.put('results', results);
+        payload.put('moogsoft_results', moogsoft_results);
+        return payload;
+      """,
+      "lang": "painless"
+    }
+  },
+  "actions": {
+    "index_results": {
+      "condition": {
+        "script": {
+          "source": "return ctx.payload.results != null && ctx.payload.results.size() > 0",
+          "lang": "painless"
+        }
+      },
+      "foreach": "ctx.payload.results",
+      "max_iterations": 1000,
+      "index": {
+        "index": "reporting-pipelines-spark-cluster",
+        "op_type": "create"
+      }
+    },
+    "moogsoft_alerts": {
+      "condition": {
+        "script": {
+          "source": "return ctx.payload.moogsoft_results != null && ctx.payload.moogsoft_results.size() > 0",
+          "lang": "painless"
+        }
+      },
+      "foreach": "ctx.payload.moogsoft_results",
+      "max_iterations": 1000,
+      "index": {
+        "index": "moogsoft-alerts",
+        "op_type": "create"
+      }
+    }
+  }
+}
