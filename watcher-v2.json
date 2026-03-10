@@ -1,7 +1,7 @@
 {
   "metadata": {
     "_description": "Calculates ETL file processing duration from CloudWatch logs",
-    "_author": "Urvesh Mendhe (Discover CPM Team - Ana Cano)",
+    "_author": "Urvesh Mendhe (CPM)",
     "_version": "2.0",
     "_last_updated": "2026-03-10",
     "_notes": [
@@ -9,7 +9,7 @@
       "Scans last 24 hours of logs",
       "Writes results to reporting-pipelines-spark-cluster index",
       "Writes alerts to moogsoft-alerts index",
-      "Re-usable watcher - update values in metadata"
+      "Re-usable watcher - update values in below metadata"
     ],
     "organization": "085047404459",
     "lookback_period": "24h"
